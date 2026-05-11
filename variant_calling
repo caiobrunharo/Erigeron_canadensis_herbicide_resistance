@@ -1,0 +1,57 @@
+# 1. Read trimming with Trimmomatic
+trimmomatic PE \
+  input_R1.fastq.gz input_R2.fastq.gz \
+  output_R1_paired.fq.gz output_R1_unpaired.fq.gz \
+  output_R2_paired.fq.gz output_R2_unpaired.fq.gz \
+  -threads 48 \
+  SLIDINGWINDOW:4:5 \
+  LEADING:5 \
+  TRAILING:5 \
+  MINLEN:25
+
+# 2. Align reads to the reference genome with BWA-MEM
+bwa mem \
+  -t 96 \
+  -R '@RG\tID:SAMPLE_ID\tSM:SAMPLE_ID' \
+  -M reference_genome.fasta \
+  output_R1_paired.fq.gz \
+  output_R2_paired.fq.gz | \
+samtools view -bh -@ 96 - | \
+samtools sort -@ 96 -O bam -o aligned_reads.bam -
+
+# 3. Remove PCR duplicates with Picard
+java -Xmx100G \
+  -XX:-UseGCOverheadLimit \
+  -Djava.io.tmpdir=./ \
+  -jar picard.jar MarkDuplicates \
+  INPUT=aligned_reads.bam \
+  OUTPUT=deduplicated_reads.bam \
+  METRICS_FILE=deduplication_metrics.txt \
+  TMP_DIR=./ \
+  ASSUME_SORTED=TRUE \
+  VALIDATION_STRINGENCY=LENIENT \
+  REMOVE_DUPLICATES=TRUE
+
+samtools index deduplicated_reads.bam -@ 24
+
+# 4. Variant calling with FreeBayes
+freebayes \
+  -f reference_genome.fasta \
+  --bam-list bamlist.txt \
+  --use-best-n-alleles 4 \
+  -C 5 \
+  --min-coverage 5 \
+  --vcf freebayes_output.vcf
+
+
+# 5. Variant filtering with VCFtools
+vcftools \
+  --vcf input.vcf \
+  --maf 0.05 \
+  --min-alleles 2 \
+  --max-alleles 2 \
+  --min-meanDP 25 \
+  --max-missing 0.75 \
+  --recode \
+  --recode-INFO-all \
+  --out filtered_variants
