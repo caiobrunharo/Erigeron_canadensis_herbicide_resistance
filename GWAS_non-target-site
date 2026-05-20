@@ -1,0 +1,202 @@
+###############################################################
+# GWAS using GAPIT
+###############################################################
+
+library(data.table)
+library(dplyr)
+
+# Load GAPIT
+source("GAPIT.library.R")
+source("gapit_functions.txt")
+source("GAPIT.Numericalization.R")
+
+############################
+# Input files
+############################
+
+genotype_file  <- "hapmap.hmp.txt"
+phenotype_file <- "phenotype.txt"
+
+############################
+# Read input data
+############################
+
+myGenotype <- read.delim(
+  genotype_file,
+  header = FALSE
+)
+
+myY <- read.table(
+  phenotype_file,
+  header = TRUE
+)
+
+############################
+# GLM
+############################
+
+gwas_glm <- GAPIT(
+  Y = myY,
+  G = myGenotype,
+  PCA.total = 4,
+  Multiple_analysis = FALSE,
+  model = "GLM",
+  Random.model = FALSE,
+  Geno.View.output = FALSE
+)
+
+############################
+# MLMM
+############################
+
+gwas_mlmm <- GAPIT(
+  Y = myY,
+  G = myGenotype,
+  PCA.total = 4,
+  Multiple_analysis = FALSE,
+  model = "MLMM",
+  Geno.View.output = FALSE
+)
+
+############################
+# BLINK
+############################
+
+gwas_blink <- GAPIT(
+  Y = myY,
+  G = myGenotype,
+  PCA.total = 4,
+  Multiple_analysis = FALSE,
+  model = "Blink",
+  Geno.View.output = FALSE
+)
+
+###############################################################
+# GWAS using GMMAT
+###############################################################
+
+library(GMMAT)
+library(data.table)
+library(dplyr)
+
+############################
+# Input files
+############################
+
+phenotype_file <- "phenotype.txt"
+sample_file    <- "vcf_samples.txt"
+pca_file       <- "gwas_pca.eigenvec"
+kinship_file   <- "kinship.rel.gz"
+kinship_ids    <- "kinship.rel.id"
+dosage_file    <- "genotypes_dosage.tsv"
+
+output_file    <- "gmmat_gwas_results.txt"
+
+############################
+# Load phenotype
+############################
+
+pheno <- fread(
+  phenotype_file,
+  sep = "\t"
+)
+
+pheno[, sample := as.character(sample)]
+pheno[, Glyphosate_R := as.numeric(Glyphosate_R)]
+
+############################
+# Load sample order
+############################
+
+vcf_samples <- readLines(sample_file)
+
+pheno_vcf <- pheno[match(vcf_samples, pheno$sample), ]
+
+if (any(is.na(pheno_vcf$sample))) {
+  stop("Some VCF samples are missing from phenotype file.")
+}
+
+############################
+# Load PCA covariates
+############################
+
+pcs <- fread(
+  pca_file,
+  header = FALSE
+)
+
+colnames(pcs) <- c(
+  "FID",
+  "sample",
+  paste0("PC", seq_len(ncol(pcs) - 2))
+)
+
+pcs[, sample := as.character(sample)]
+
+pheno_vcf <- left_join(
+  pheno_vcf,
+  pcs[, .(sample, PC1, PC2, PC3)],
+  by = "sample"
+)
+
+if (any(is.na(pheno_vcf$PC1)) ||
+    any(is.na(pheno_vcf$PC2)) ||
+    any(is.na(pheno_vcf$PC3))) {
+  stop("Some samples are missing PCA covariates.")
+}
+
+############################
+# Load kinship matrix
+############################
+
+kinship <- as.matrix(
+  fread(kinship_file, header = FALSE)
+)
+
+kin_ids <- fread(
+  kinship_ids,
+  header = FALSE
+)
+
+rownames(kinship) <- as.character(kin_ids$V2)
+colnames(kinship) <- as.character(kin_ids$V2)
+
+if (!all(vcf_samples %in% rownames(kinship))) {
+  stop("Some VCF samples are missing from the kinship matrix.")
+}
+
+kinship_vcf <- kinship[vcf_samples, vcf_samples]
+
+############################
+# Final checks
+############################
+
+stopifnot(identical(pheno_vcf$sample, vcf_samples))
+stopifnot(identical(pheno_vcf$sample, rownames(kinship_vcf)))
+
+############################
+# Fit null logistic mixed model
+############################
+
+null_model <- glmmkin(
+  Glyphosate_R ~ PC1 + PC2 + PC3,
+  data = pheno_vcf,
+  kins = list(K = kinship_vcf),
+  id = "sample",
+  family = binomial(link = "logit")
+)
+
+############################
+# Run GWAS
+############################
+
+glmm.score(
+  obj = null_model,
+  infile = dosage_file,
+  outfile = output_file,
+  infile.nrow.skip = 1,
+  infile.ncol.skip = 1,
+  infile.ncol.print = 1,
+  is.dosage = TRUE,
+  nperbatch = 5
+)
