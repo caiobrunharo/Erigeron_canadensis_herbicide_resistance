@@ -1,0 +1,98 @@
+#!/bin/bash
+
+#############################################
+# PCA and ADMIXTURE analysis
+#############################################
+
+CONDAPATH=$(which conda)
+eval "$(${CONDAPATH} shell.bash hook)"
+conda activate TASSEL
+
+#############################################
+# Input files
+#############################################
+
+VCF="my_variants.vcf.gz"
+OUT_PREFIX="my_dataset"
+
+#############################################
+# 1. LD pruning
+#############################################
+
+plink \
+  --vcf "$VCF" \
+  --double-id \
+  --allow-extra-chr \
+  --set-missing-var-ids @:# \
+  --indep-pairwise 50 10 0.1 \
+  --out "$OUT_PREFIX"
+
+#############################################
+# 2. PCA using LD-pruned SNPs
+#############################################
+
+plink \
+  --vcf "$VCF" \
+  --double-id \
+  --allow-extra-chr \
+  --set-missing-var-ids @:# \
+  --extract "${OUT_PREFIX}.prune.in" \
+  --make-bed \
+  --pca \
+  --recode vcf \
+  --out PCA
+
+#############################################
+# 3. ADMIXTURE analysis
+#############################################
+
+for K in {1..20}; do
+
+  echo "Running ADMIXTURE for K=${K}"
+
+  admixture \
+    -j48 \
+    --cv \
+    PCA.bed \
+    "$K" | tee "log_K${K}.out"
+
+done
+
+
+#!/bin/bash
+
+#############################################
+# Phylogenetic tree construction
+#############################################
+
+CONDAPATH=$(which conda)
+eval "$(${CONDAPATH} shell.bash hook)"
+conda activate TASSEL
+
+#############################################
+# Input files
+#############################################
+
+VCF="filtered_variants.vcf"
+ALIGNMENT="alignment.phy"
+TREE_PREFIX="phylogeny"
+
+#############################################
+# 1. Convert VCF to PHYLIP format
+#############################################
+
+python vcf2phylip.py \
+  -i "$VCF" \
+  -o "$ALIGNMENT"
+
+#############################################
+# 2. Maximum-likelihood tree inference
+#############################################
+
+raxml-ng \
+  --all \
+  --msa "$ALIGNMENT" \
+  --model GTR+G \
+  --bs-trees 1000 \
+  --prefix "$TREE_PREFIX" \
+  --threads 30
