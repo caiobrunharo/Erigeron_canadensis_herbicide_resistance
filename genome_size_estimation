@@ -1,0 +1,70 @@
+############################
+# Jellyfish k-mer counting
+############################
+
+CONDAPATH=$(which conda)
+eval "$(${CONDAPATH} shell.bash hook)"
+conda activate JELLYFISH
+
+# File containing one sample prefix per line
+SAMPLE_LIST="sample_list.txt"
+
+# Jellyfish parameters
+KMER_SIZE=21
+HASH_SIZE=700M
+THREADS=16
+MAX_HISTO=100000
+
+while read -r SAMPLE; do
+
+  echo "Processing ${SAMPLE}"
+
+  jellyfish count \
+    -C \
+    -m ${KMER_SIZE} \
+    -s ${HASH_SIZE} \
+    -t ${THREADS} \
+    <(zcat ${SAMPLE}_paired_1.fq.gz) \
+    <(zcat ${SAMPLE}_paired_2.fq.gz) \
+    -o ${SAMPLE}_reads.jf
+
+  jellyfish histo \
+    -t ${THREADS} \
+    ${SAMPLE}_reads.jf \
+    -h ${MAX_HISTO} \
+    > ${SAMPLE}_reads.histo
+
+done < "$SAMPLE_LIST"
+
+
+#!/bin/bash
+
+############################
+# GenomeScope analysis
+############################
+
+CONDAPATH=$(which conda)
+eval "$(${CONDAPATH} shell.bash hook)"
+conda activate JELLYFISH
+
+# File containing one histogram file per line
+HISTO_LIST="histo_list.txt"
+
+# Path to GenomeScope script
+GENOMESCOPE="/path/to/genomescope.R"
+
+KMER_SIZE=21
+
+while read -r HISTO; do
+
+  echo "Running GenomeScope for ${HISTO}"
+
+  genomescope.R \
+    -i ${HISTO} \
+    -o ./${HISTO}_folder \
+    -k ${KMER_SIZE}
+
+done < "$HISTO_LIST"
+
+
+
