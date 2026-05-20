@@ -1,0 +1,76 @@
+#!/bin/bash
+
+############################
+# Required software
+############################
+module load bedtools
+
+CONDAPATH=$(which conda)
+eval "$(${CONDAPATH} shell.bash hook)"
+conda activate MOSDEPTH
+
+############################
+# Input files
+############################
+GFF="reference_annotations.gff3"
+BAMLIST="bamlist.txt"
+PAV_SCRIPT="makePAV.py"
+
+############################
+# Generate sample list
+############################
+cut -f1 "$BAMLIST" | awk 'NF>0' > samples.txt
+
+############################
+# Build CDS BED file
+############################
+awk 'BEGIN{FS=OFS="\t"}
+     !/^#/ && $3=="CDS" {
+       print $1, $4-1, $5, $9
+     }' "$GFF" \
+| sort -k1,1 -k2,2n \
+> cds_only.bed
+
+############################
+# Generate per-sample PAV rows
+############################
+mkdir -p pav_tmp pav_rows
+
+while read -r sample; do
+
+  PERBASE="${sample}.per-base.bed.gz"
+
+  if [[ ! -f "$PERBASE" ]]; then
+    echo "Missing file: $PERBASE"
+    continue
+  fi
+
+  echo "Processing ${sample}"
+
+  # Intersect per-base depth with CDS coordinates
+  zcat "$PERBASE" | \
+    bedtools intersect \
+      -a stdin \
+      -b cds_only.bed \
+      -wa -wb \
+    > "pav_tmp/${sample}.depth_vs_cds.tsv"
+
+  # Generate binary PAV row
+  python "$PAV_SCRIPT" \
+    "$GFF" \
+    "pav_tmp/${sample}.depth_vs_cds.tsv" \
+    > "pav_rows/${sample}.pav.tsv"
+
+done < samples.txt
+
+############################
+# Merge all samples into one matrix
+############################
+FIRST_ROW=$(ls pav_rows/*.pav.tsv | head -n 1)
+
+cat "$FIRST_ROW" > PAV_matrix.tsv
+
+for FILE in pav_rows/*.pav.tsv; do
+  [[ "$FILE" == "$FIRST_ROW" ]] && continue
+  tail -n 1 "$FILE" >> PAV_matrix.tsv
+done
