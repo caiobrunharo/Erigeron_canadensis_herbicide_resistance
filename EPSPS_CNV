@@ -1,0 +1,153 @@
+#!/bin/bash
+
+#############################################
+# Quantify EPSPS copy number variation
+#############################################
+
+CONDAPATH=$(which conda)
+eval "$(${CONDAPATH} shell.bash hook)"
+conda activate MOSDEPTH
+
+#############################################
+# Input files
+#############################################
+
+BAM_DIR="bam"
+OUT_DIR="mosdepth_out"
+
+EPSPS_RAW_BED="EPSPS_4copies.raw.bed"
+EPSPS_BED="EPSPS_4copies.labeled.bed"
+
+SAMPLE_LIST="samples.txt"
+
+THREADS=20
+MAPQ=20
+
+mkdir -p "$OUT_DIR"
+
+#############################################
+# 1. Define EPSPS copy coordinates
+#############################################
+
+cat > "$EPSPS_RAW_BED" << EOF
+scaffold_3	15876784	15882192
+scaffold_3	41172148	41177528
+scaffold_4	23262014	23298145
+scaffold_4	23302894	23323558
+EOF
+
+awk 'BEGIN{OFS="\t"} {
+  print $1, $2, $3, "EPSPS_copy" NR
+}' "$EPSPS_RAW_BED" > "$EPSPS_BED"
+
+#############################################
+# 2. Create sample list from BAM files
+#############################################
+
+ls "${BAM_DIR}"/*.bam | \
+  sed 's#.*/##; s/\.bam$//' \
+  > "$SAMPLE_LIST"
+
+#############################################
+# 3. Estimate coverage across EPSPS copies
+#############################################
+
+while read -r SAMPLE; do
+
+  echo "Processing ${SAMPLE}"
+
+  mosdepth \
+    --threads "$THREADS" \
+    --mapq "$MAPQ" \
+    --no-per-base \
+    --fast-mode \
+    --by "$EPSPS_BED" \
+    "${OUT_DIR}/${SAMPLE}" \
+    "${BAM_DIR}/${SAMPLE}.bam"
+
+done < "$SAMPLE_LIST"
+
+#############################################
+# Summarize EPSPS relative copy number
+#############################################
+
+OUT_DIR="mosdepth_out"
+SAMPLE_LIST="samples.txt"
+
+OUTPUT="EPSPS4_relCN.tsv"
+OUTPUT_Z="EPSPS4_relCN_withZ.tsv"
+CANDIDATES="EPSPS4_highCN_candidates.tsv"
+
+#############################################
+# 1. Create output table
+#############################################
+
+echo -e "Sample\tgenome_mean_cov\tepsps_copy1_cov\tepsps_copy2_cov\tepsps_copy3_cov\tepsps_copy4_cov\tepsps_copy1_relCN\tepsps_copy2_relCN\tepsps_copy3_relCN\tepsps_copy4_relCN\tepsps_relCN_total" \
+> "$OUTPUT"
+
+#############################################
+# 2. Extract genome-wide and EPSPS coverage
+#############################################
+
+while read -r SAMPLE; do
+
+  SUMMARY="${OUT_DIR}/${SAMPLE}.mosdepth.summary.txt"
+  REGIONS="${OUT_DIR}/${SAMPLE}.regions.bed.gz"
+
+  GENOME_MEAN=$(awk '$1=="total"{print $4}' "$SUMMARY")
+
+  COVS=$(zcat "$REGIONS" | \
+    awk 'BEGIN{
+      FS=OFS="\t";
+      for(i=1;i<=4;i++) cov[i]="nan"
+    }
+    {
+      name=$4
+      if(name ~ /^EPSPS_copy[1-4]$/){
+        sub(/^EPSPS_copy/, "", name)
+        i=name+0
+        cov[i]=$5
+      }
+    }
+    END{
+      print cov[1], cov[2], cov[3], cov[4]
+    }')
+
+  E1=$(echo "$COVS" | cut -f1)
+  E2=$(echo "$COVS" | cut -f2)
+  E3=$(echo "$COVS" | cut -f3)
+  E4=$(echo "$COVS" | cut -f4)
+
+  RELS=$(awk \
+    -v G="$GENOME_MEAN" \
+    -v E1="$E1" \
+    -v E2="$E2" \
+    -v E3="$E3" \
+    -v E4="$E4" \
+    'BEGIN{
+      FS=OFS="\t";
+
+      r1=(G>0 && E1!="nan") ? E1/G : -1;
+      r2=(G>0 && E2!="nan") ? E2/G : -1;
+      r3=(G>0 && E3!="nan") ? E3/G : -1;
+      r4=(G>0 && E4!="nan") ? E4/G : -1;
+
+      total=0;
+      if(r1>=0) total+=r1;
+      if(r2>=0) total+=r2;
+      if(r3>=0) total+=r3;
+      if(r4>=0) total+=r4;
+
+      printf("%.3f\t%.3f\t%.3f\t%.3f\t%.3f", r1, r2, r3, r4, total);
+    }')
+
+  R1=$(echo "$RELS" | cut -f1)
+  R2=$(echo "$RELS" | cut -f2)
+  R3=$(echo "$RELS" | cut -f3)
+  R4=$(echo "$RELS" | cut -f4)
+  RT=$(echo "$RELS" | cut -f5)
+
+  echo -e "${SAMPLE}\t${GENOME_MEAN}\t${E1}\t${E2}\t${E3}\t${E4}\t${R1}\t${R2}\t${R3}\t${R4}\t${RT}" \
+  >> "$OUTPUT"
+
+done < "$SAMPLE_LIST"
