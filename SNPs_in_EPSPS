@@ -1,0 +1,109 @@
+#!/bin/bash
+
+#############################################
+# Identify SNPs in target genes for each sample
+#############################################
+
+CONDAPATH=$(which conda)
+eval "$(${CONDAPATH} shell.bash hook)"
+
+mkdir -p bam vcf consensus
+
+#############################################
+# Input files and parameters
+#############################################
+
+REF="target_genes_reference.fa"
+SAMPLE_LIST="sample_list.txt"
+
+THREADS_ALIGN=20
+THREADS_CALL=20
+
+MIN_QUAL=20
+MIN_DEPTH=10
+
+#############################################
+# 1. Align reads to the target-gene reference
+#############################################
+
+conda activate BWA
+module load samtools
+
+bwa index "$REF"
+samtools faidx "$REF"
+
+while read -r SAMPLE; do
+
+  echo "Aligning ${SAMPLE}"
+
+  bwa mem \
+    -t "$THREADS_ALIGN" \
+    -R "@RG\tID:${SAMPLE}\tSM:${SAMPLE}" \
+    -M "$REF" \
+    "${SAMPLE}_R1.fastq.gz" \
+    "${SAMPLE}_R2.fastq.gz" | \
+  samtools view \
+    -bh \
+    -@ "$THREADS_ALIGN" \
+    - | \
+  samtools sort \
+    -@ "$THREADS_ALIGN" \
+    -O bam \
+    -o "bam/${SAMPLE}.bam" \
+    -
+
+  samtools index "bam/${SAMPLE}.bam"
+
+done < "$SAMPLE_LIST"
+
+conda deactivate
+
+#############################################
+# 2. Call SNPs and generate consensus sequences
+#############################################
+
+conda activate VCFTOOLS
+module load samtools
+
+while read -r SAMPLE; do
+
+  BAM="bam/${SAMPLE}.bam"
+  VCF="vcf/${SAMPLE}.target_genes.vcf.gz"
+
+  echo "Calling variants for ${SAMPLE}"
+
+  bcftools mpileup \
+    -f "$REF" \
+    -Ou \
+    --threads "$THREADS_CALL" \
+    "$BAM" | \
+  bcftools call \
+    -mv \
+    -Ou \
+    --ploidy 2 \
+    --threads "$THREADS_CALL" | \
+  bcftools filter \
+    -Ou \
+    -e "QUAL<${MIN_QUAL} || DP<${MIN_DEPTH}" | \
+  bcftools norm \
+    -f "$REF" \
+    -Oz \
+    -o "$VCF"
+
+  bcftools index -f "$VCF"
+
+  echo "Generating allele-specific consensus FASTA files for ${SAMPLE}"
+
+  bcftools consensus \
+    -f "$REF" \
+    -H 1 \
+    "$VCF" \
+    > "consensus/${SAMPLE}.allele1.fa"
+
+  bcftools consensus \
+    -f "$REF" \
+    -H 2 \
+    "$VCF" \
+    > "consensus/${SAMPLE}.allele2.fa"
+
+done < "$SAMPLE_LIST"
