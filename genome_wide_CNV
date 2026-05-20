@@ -1,0 +1,308 @@
+#!/bin/bash
+
+#############################################
+# Genome-wide CNV estimation using read depth
+#############################################
+
+CONDAPATH=$(which conda)
+eval "$(${CONDAPATH} shell.bash hook)"
+conda activate MOSDEPTH
+
+module load samtools
+module load bedtools
+
+#############################################
+# Input files
+#############################################
+
+REFERENCE="reference_genome.fasta"
+BAM_DIR="bam"
+SAMPLE_LIST="samples.txt"
+
+WINDOW_SIZE=10000
+WINDOWS_BED="windows_10kb.bed"
+
+OUT_DIR="mosdepth_10kb"
+THREADS=2
+
+mkdir -p "$OUT_DIR"
+
+#############################################
+# 1. Create non-overlapping genomic windows
+#############################################
+
+samtools faidx "$REFERENCE"
+
+bedtools makewindows \
+  -g "${REFERENCE}.fai" \
+  -w "$WINDOW_SIZE" \
+  > "$WINDOWS_BED"
+
+#############################################
+# 2. Estimate read depth in each window
+#############################################
+
+while read -r SAMPLE; do
+
+  echo "Processing ${SAMPLE}"
+
+  mosdepth \
+    --threads "$THREADS" \
+    --by "$WINDOWS_BED" \
+    --no-per-base \
+    "${OUT_DIR}/${SAMPLE}" \
+    "${BAM_DIR}/${SAMPLE}.bam"
+
+done < "$SAMPLE_LIST"
+
+
+###############################################################
+# From here on, analyses performed in R
+###############################################################
+
+###############################################################
+# Create genome-wide CNV dosage matrix from mosdepth output
+###############################################################
+
+library(data.table)
+library(dplyr)
+library(R.utils)
+
+############################
+# Input files
+############################
+
+metadata_file <- "metadata.csv"
+mosdepth_dir  <- "mosdepth_10kb"
+outdir        <- "CNV_output"
+
+dir.create(outdir, showWarnings = FALSE)
+
+############################
+# Load metadata
+############################
+
+metadata <- fread(metadata_file)
+
+# Expected columns: sample, pop, phenotype, Q1, Q2, Q3
+metadata[, sample := as.character(sample)]
+
+############################
+# Helper functions
+############################
+
+read_genome_mean <- function(summary_file) {
+  x <- fread(summary_file, header = FALSE)
+  total <- x[V1 == "total"]
+  as.numeric(total$V4)
+}
+
+read_regions <- function(regions_file) {
+  tmp <- tempfile(fileext = ".bed")
+  gunzip(regions_file, destname = tmp, remove = FALSE, overwrite = TRUE)
+  
+  fread(
+    tmp,
+    col.names = c("chrom", "start", "end", "depth")
+  )
+}
+
+############################
+# Read mosdepth files
+############################
+
+region_files <- list.files(
+  mosdepth_dir,
+  pattern = "regions\\.bed\\.gz$",
+  full.names = TRUE
+)
+
+sample_map <- data.table(
+  sample = sub("\\.regions\\.bed\\.gz$", "", basename(region_files)),
+  file = region_files
+)
+
+metadata <- metadata[sample %in% sample_map$sample]
+metadata <- metadata[order(sample)]
+
+all_cnv <- list()
+
+for (i in seq_len(nrow(metadata))) {
+  
+  sample_id <- metadata$sample[i]
+  
+  message("Processing ", sample_id)
+  
+  summary_file <- file.path(
+    mosdepth_dir,
+    paste0(sample_id, ".mosdepth.summary.txt")
+  )
+  
+  regions_file <- sample_map[sample == sample_id, file]
+  
+  genome_mean <- read_genome_mean(summary_file)
+  
+  regions <- read_regions(regions_file)
+  
+  regions[, window_id := paste(chrom, start, end, sep = ":")]
+  regions[, sample := sample_id]
+  regions[, genome_mean := genome_mean]
+  
+  # Normalize window depth by genome-wide mean depth
+  # Diploid baseline is scaled to CN = 2
+  regions[, cnv := 2 * (depth / genome_mean)]
+  
+  all_cnv[[i]] <- regions[, .(window_id, sample, cnv)]
+}
+
+all_cnv <- rbindlist(all_cnv)
+
+############################
+# Convert to wide CNV matrix
+############################
+
+cnv_matrix <- dcast(
+  all_cnv,
+  window_id ~ sample,
+  value.var = "cnv"
+)
+
+fwrite(
+  cnv_matrix,
+  file.path(outdir, "cnv_dosage.tsv"),
+  sep = "\t"
+)
+
+gzip(
+  file.path(outdir, "cnv_dosage.tsv"),
+  overwrite = TRUE
+)
+
+############################
+# Save phenotype file
+############################
+
+phenotype <- metadata %>%
+  transmute(
+    id = sample,
+    pop = pop,
+    phenotype = phenotype,
+    Q1 = Q1,
+    Q2 = Q2,
+    Q3 = Q3
+  )
+
+fwrite(
+  as.data.table(phenotype),
+  file.path(outdir, "phenotype.tsv"),
+  sep = "\t"
+)
+
+
+
+
+###############################################################
+# CNV-GWAS using GMMAT
+###############################################################
+
+library(data.table)
+library(GMMAT)
+
+############################
+# Input files
+############################
+
+pheno_file   <- "CNV_output/phenotype.tsv"
+cnv_file     <- "CNV_output/cnv_dosage.tsv.gz"
+fam_file     <- "PCA.fam"
+kin_rel_file <- "kinship.rel.gz"
+kin_id_file  <- "kinship.rel.id"
+
+outdir <- "CNV_GMMAT"
+dir.create(outdir, showWarnings = FALSE)
+
+############################
+# Load phenotype and CNV data
+############################
+
+pheno <- fread(pheno_file)
+cnv   <- fread(cnv_file)
+
+pheno[, id := as.character(id)]
+pheno[, resistant := ifelse(phenotype == "R", 1L, 0L)]
+
+############################
+# Load kinship matrix
+############################
+
+kin_ids <- fread(kin_id_file, header = FALSE)
+kinship <- as.matrix(fread(kin_rel_file, header = FALSE))
+
+rownames(kinship) <- kin_ids$V2
+colnames(kinship) <- kin_ids$V2
+
+############################
+# Harmonize sample IDs
+############################
+
+cnv_ids <- setdiff(names(cnv), "window_id")
+
+common_ids <- Reduce(
+  intersect,
+  list(pheno$id, cnv_ids, rownames(kinship))
+)
+
+pheno <- pheno[match(common_ids, id)]
+kinship <- kinship[common_ids, common_ids]
+cnv <- cnv[, c("window_id", common_ids), with = FALSE]
+
+############################
+# Fit null model
+############################
+
+pheno[, Q1 := as.numeric(Q1)]
+pheno[, Q2 := as.numeric(Q2)]
+pheno[, Q3 := as.numeric(Q3)]
+
+null_model <- glmmkin(
+  fixed  = resistant ~ Q1 + Q2 + Q3,
+  data   = as.data.frame(pheno),
+  kins   = list(K = kinship),
+  id     = "id",
+  family = binomial(link = "logit")
+)
+
+saveRDS(null_model, file.path(outdir, "null_model.rds"))
+
+############################
+# Run CNV association test
+############################
+
+cnv_infile <- file.path(outdir, "cnv_for_glmm_score.tsv.gz")
+
+fwrite(
+  cnv,
+  cnv_infile,
+  sep = "\t",
+  quote = FALSE,
+  compress = "gzip"
+)
+
+score_outfile <- file.path(outdir, "glmm_score_results.tsv")
+
+glmm.score(
+  obj                 = null_model,
+  infile              = cnv_infile,
+  outfile             = score_outfile,
+  center              = TRUE,
+  MAF.range           = c(1e-7, 0.5),
+  miss.cutoff         = 1,
+  missing.method      = "impute2mean",
+  nperbatch           = 500,
+  infile.sep          = "\t",
+  infile.ncol.skip    = 1,
+  infile.ncol.print   = 1,
+  infile.header.print = "SNP",
+  is.dosage           = TRUE,
+  ncores              = 1
+)
