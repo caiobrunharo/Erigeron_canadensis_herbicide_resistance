@@ -1,0 +1,17 @@
+# Conda environment for stages 3-4 (family annotation + figures/statistics).
+# Stage 1 uses a separate, fully pinned environment: data/synLTR_ltrharvest_env.yml
+# Stage 2 (TEMP2) uses its own environment per the TEMP2 repo.
+#
+#   mamba env create -f environment.yml
+#   mamba activate marestail-te-figures
+name: marestail-te-figures
+channels:
+  - conda-forge
+  - bioconda
+dependencies:
+  - python>=3.9
+  - numpy
+  - pandas
+  - scipy
+  - matplotlib
+  - gawk            # te_figures.py shells out to awk for the --awk filter

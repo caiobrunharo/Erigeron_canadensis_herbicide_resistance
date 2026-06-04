@@ -1,0 +1,18 @@
+Note on file extensions
+=======================
+
+To get past the mail server's attachment filter, three script files were given
+a trailing ".txt" extension. After unzipping, rename them back by removing the
+".txt":
+
+  04_figures/te_figures.py.txt                 ->  te_figures.py
+  03_annotate_families/add_transposon_family.py.txt  ->  add_transposon_family.py
+  02_run_temp2/run_TEMP2.slurm.txt             ->  run_TEMP2.slurm
+
+One-liner to restore them all (run from inside transposable_elements/):
+
+  find . -name '*.txt' ! -name 'prefixes.txt' ! -name 'RESTORE_FILENAMES.txt' \
+    -exec sh -c 'mv "$1" "${1%.txt}"' _ {} \;
+
+(prefixes.txt and the .md/.yml files are genuine text/config files and should
+be left as-is.)
